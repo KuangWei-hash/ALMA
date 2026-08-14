@@ -508,7 +508,7 @@ class SortableTableModel extends DefaultTableModel {
    * @param ascending True if ascending order is required.
    */
   public void sort() {
-    Vector<Vector<Object>> table = (Vector<Vector<Object>>) getDataVector();
+    Vector<Vector<Object>> table = (Vector<Vector<Object>>) (Vector) getDataVector();
     Collections.sort(table, new TableSorter(1, true));
     fireTableStructureChanged();
   }
