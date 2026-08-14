@@ -1,3 +1,17 @@
+=== FORK NOTICE ===
+This is a personal experimental fork of ALMA maintained by KuangWei-hash.
+It is NOT the official ALMA and is not intended to be merged upstream.
+
+Upstream: https://github.com/A-L-M-A/ALMA
+Fork:     https://github.com/KuangWei-hash/ALMA
+
+Purpose of this fork:
+Experimenting with an ADAPTOR layer to connect ALMA's affective model to
+external systems (e.g. LLMs / APIs) for integration research.
+The ADAPTOR module is experimental and not part of official ALMA.
+===================
+
+
 ALMA 2015
 
 This archive contains all sources and libraries for the ALMA suite.
