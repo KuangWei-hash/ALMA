@@ -1,0 +1,30 @@
+# Build products
+lib/**/*.class
+lib/affect.jar
+build/
+dist/
+out/
+
+# Legacy SVN metadata (project has stale .svn dirs from an old migration)
+.svn/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor/backup files
+*~
+*.swp
+*.swo
+\#*\#
+.#*
+
+# IDE
+.idea/
+.vscode/
+nbproject/private/
+*.iml
+
+# Logs / temp
+*.log
+*.tmp
