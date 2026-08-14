@@ -189,14 +189,16 @@ public class AffectManager extends AppraisalManager {
     // enable the static interface
     sInterface = new InterfaceHolder();
 
-    sDesktopHelper = new DesktopHelper(); //TODO static method which creats an instance
-
     if (hasGUI) {
+      sDesktopHelper = new DesktopHelper(); //TODO static method which creats an instance
       mALMAGUI = new AlmaGUI();
       
       System.setProperty("apple.laf.useScreenMenuBar", "true");
       System.setProperty("com.apple.mrj.application.apple.menu.about.name", "ALMA CharacterBuilder");
-
+    } else {
+      // CharacterManager and GroupManager otherwise create standalone monitor
+      // frames. Integrated mode suppresses those windows for REST/headless use.
+      AlmaGUI.sIntegratedDesktopMode = true;
     }
     ConsoleHandler ch = new ConsoleHandler();
     ch.setFormatter(new AffectManagerConsoleFormatter());
@@ -237,7 +239,7 @@ public class AffectManager extends AppraisalManager {
     }
     // if no gui mode, check if interaction monitor mode activated
     if (!hasGUI) {
-      if ((ac.getRuntimeInteractionMonitor().getEnabled())) {
+      if (hasGUI && (ac.getRuntimeInteractionMonitor().getEnabled())) {
         de.affect.gui.InteractionSimulationFrame isf =
           new de.affect.gui.InteractionSimulationFrame();
         isf.setVisible(true);

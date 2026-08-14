@@ -199,7 +199,7 @@
       <attribute name="Built-By" value="Patrick Gebhard"/>
       <attribute name="Signature_version" value="2.0"/>
       <!-- <attribute name="Class-Path" value="jama.jar emotionml.jar jsr173_1.0_api.jar xbean.jar core.jar geomerative.jar gluegen-rt-natives-linux-amd64.jar gluegen-rt-natives-linux-i586.jar gluegen-rt-natives-macosx-universal.jar gluegen-rt-natives-windows-amd64.jar gluegen-rt-natives-windows-i586.jar gluegen-rt.jar jogl-all-natives-linux-amd64.jar jogl-all-natives-linux-i586.jar jogl-all-natives-macosx-universal.jar jogl-all-natives-windows-amd64.jar jogl-all-natives-windows-i586.jar jogl.all.jar ocd.jar opengl.jar peasycam.jar"/> -->
-      <attribute name="Class-Path" value="jama.jar emotionml.jar jsr173_1.0_api.jar xbean.jar/>"/>
+      <attribute name="Class-Path" value="jama.jar emotionml.jar jsr173_1.0_api.jar xbean.jar"/>
       <attribute name="Main-Class" value="de.affect.manage.AffectManager"/>
     </manifest>
     <jar jarfile="lib/affect.jar" basedir="lib" manifest="lib/MANIFEST.MF"

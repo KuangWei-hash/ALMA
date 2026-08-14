@@ -1,0 +1,94 @@
+{
+  "name": "Alice",
+  "personality": {
+    "openness": 0.5,
+    "conscientiousness": 0.3,
+    "extraversion": 0.7,
+    "agreeableness": 0.6,
+    "neurotism": -0.2,
+    "emotion_influence": 0.2
+  },
+  "mood": {
+    "decay_time": 600000,
+    "decay_period": 250,
+    "neurotism_stability": false
+  },
+  "emotion": {
+    "decay_time": 20000,
+    "decay_period": 500,
+    "decay_function": "linear",
+    "baseline": 0.0
+  },
+  "appraisal": {
+    "GoodEvent": {
+      "desirability": 0.7
+    },
+    "GoodEventForGoodOther": {
+      "agency": "other",
+      "desirability": 0.6,
+      "liking": 0.6
+    },
+    "GoodEventForBadOther": {
+      "agency": "other",
+      "desirability": 0.6,
+      "liking": -0.4
+    },
+    "BadEvent": {
+      "desirability": -0.7
+    },
+    "BadEventForGoodOther": {
+      "agency": "other",
+      "desirability": -0.6,
+      "liking": 0.6
+    },
+    "BadEventForBadOther": {
+      "agency": "other",
+      "desirability": -0.6,
+      "liking": -0.4
+    },
+    "GoodLikelyFutureEvent": {
+      "desirability": 0.5,
+      "likelihood": 0.5
+    },
+    "GoodUnlikelyFutureEvent": {
+      "desirability": 0.5,
+      "likelihood": -0.5
+    },
+    "BadLikelyFutureEvent": {
+      "desirability": -0.5,
+      "likelihood": 0.5
+    },
+    "BadUnlikelyFutureEvent": {
+      "desirability": -0.5,
+      "likelihood": -0.5
+    },
+    "EventConfirmed": {
+      "realization": true
+    },
+    "EventDisconfirmed": {
+      "realization": false
+    },
+    "GoodActSelf": {
+      "praiseworthiness": 0.5,
+      "agency": "self"
+    },
+    "GoodActOther": {
+      "praiseworthiness": 0.5,
+      "agency": "other"
+    },
+    "BadActSelf": {
+      "praiseworthiness": -0.5,
+      "agency": "self"
+    },
+    "BadActOther": {
+      "praiseworthiness": -0.5,
+      "agency": "other"
+    },
+    "NiceThing": {
+      "appealingness": 0.5
+    },
+    "NastyThing": {
+      "appealingness": -0.5
+    }
+  }
+}
