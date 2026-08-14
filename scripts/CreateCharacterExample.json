@@ -90,5 +90,28 @@
     "NastyThing": {
       "appealingness": -0.5
     }
-  }
+  },
+  "complex_appraisal": [
+    {
+      "kind": "self_act",
+      "signal": "Help",
+      "appraisal": {
+        "GoodActSelf": {
+          "praiseworthiness": 0.8,
+          "agency": "self"
+        }
+      }
+    },
+    {
+      "kind": "direct_act",
+      "signal": "Help",
+      "performer": "Bob",
+      "appraisal": {
+        "GoodActOther": {
+          "praiseworthiness": 0.8,
+          "agency": "other"
+        }
+      }
+    }
+  ]
 }

@@ -4,21 +4,30 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import de.affect.manage.AffectManager;
+import de.affect.manage.CharacterManager;
+import de.affect.manage.GroupManager;
+import de.affect.gui.AlmaGUI;
+import de.affect.emotion.Emotion;
+import de.affect.mood.Mood;
+import de.affect.personality.Personality;
 import de.affect.util.AppraisalTag;
 import de.affect.xml.AffectInputDocument.AffectInput;
+import de.affect.xml.AffectComputationDocument;
 import de.affect.xml.AffectDefinitionDocument;
 import de.affect.xml.AffectDefinitionDocument.AffectDefinition;
-import de.affect.xml.AffectOutputDocument;
-import de.affect.xml.AffectOutputDocument.AffectOutput.CharacterAffect;
-import de.affect.xml.EmotionType;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 
@@ -28,7 +37,20 @@ public class AlmaRestServer {
   private final HttpServer http;
 
   public AlmaRestServer(String compSpec, String defSpec, int port) throws Exception {
-    this.am = new AffectManager(compSpec, defSpec, false);
+    // The adaptor owns headless policy; the original ALMA core remains untouched.
+    AlmaGUI.sIntegratedDesktopMode = true;
+    AffectComputationDocument compDoc;
+    try (InputStream input = Files.newInputStream(Paths.get(compSpec))) {
+      compDoc = AffectComputationDocument.Factory.parse(input);
+    }
+    if (compDoc.getAffectComputation().getRuntimeInteractionMonitor() != null) {
+      compDoc.getAffectComputation().getRuntimeInteractionMonitor().setEnabled(false);
+    }
+    byte[] headlessComp = compDoc.xmlText().getBytes(StandardCharsets.UTF_8);
+    try (InputStream compInput = new ByteArrayInputStream(headlessComp);
+         InputStream defInput = Files.newInputStream(Paths.get(defSpec))) {
+      this.am = new AffectManager(compInput, defInput, false);
+    }
     this.http = HttpServer.create(new InetSocketAddress(port), 0);
     this.http.setExecutor(Executors.newFixedThreadPool(4));
     registerHandlers();
@@ -44,7 +66,10 @@ public class AlmaRestServer {
     http.createContext("/characters", this::handleCharacters);
     http.createContext("/affect",     this::handleAffect);
     http.createContext("/event",      this::handleEvent);
+    http.createContext("/eec",        this::handleEec);
+    http.createContext("/act",        this::handleAct);
     http.createContext("/pad",        this::handlePad);
+    http.createContext("/groups",     this::handleGroups);
     http.createContext("/pause",      this::handlePause);
     http.createContext("/resume",     this::handleResume);
   }
@@ -52,11 +77,9 @@ public class AlmaRestServer {
   private void handleCharacters(HttpExchange ex) throws IOException {
     if ("POST".equals(ex.getRequestMethod())) { handleCreateCharacter(ex); return; }
     if (!"GET".equals(ex.getRequestMethod())) { fail(ex, 405, "GET or POST only"); return; }
-    AffectOutputDocument aod = am.sInterface.getCurrentAffect();
-    if (aod == null) { ok(ex, "{\"characters\":[]}"); return; }
     StringBuilder sb = new StringBuilder("{\"characters\":[");
     boolean first = true;
-    for (CharacterAffect c : aod.getAffectOutput().getCharacterAffectList()) {
+    for (CharacterManager c : am.sInterface.getCharacters()) {
       if (!first) sb.append(",");
       sb.append("\"").append(escape(c.getName())).append("\"");
       first = false;
@@ -78,6 +101,7 @@ public class AlmaRestServer {
       Map<String, Object> mood = requiredObject(root, "mood");
       Map<String, Object> emotion = requiredObject(root, "emotion");
       Map<String, Object> appraisal = requiredObject(root, "appraisal");
+      Object complexAppraisal = root.get("complex_appraisal");
 
       double openness = unit(personality, "openness");
       double conscientiousness = unit(personality, "conscientiousness");
@@ -114,9 +138,12 @@ public class AlmaRestServer {
         .append("\" decayfunction=\"").append(decayFunction).append("\" baseline=\"").append(baseline).append("\"/>")
         .append("<Appraisal><Basic>");
       appendAppraisalXml(xml, appraisal);
-      xml.append("</Basic></Appraisal></CharacterAffect></AffectDefinition>");
+      xml.append("</Basic>");
+      if (complexAppraisal != null) appendComplexAppraisalXml(xml, complexAppraisal);
+      xml.append("</Appraisal></CharacterAffect></AffectDefinition>");
 
       AffectDefinitionDocument doc = AffectDefinitionDocument.Factory.parse(xml.toString());
+      if (!doc.validate()) throw new IllegalArgumentException("generated character does not validate against ALMA Affect.xsd");
       AffectDefinition.CharacterAffect profile = doc.getAffectDefinition().getCharacterAffectArray(0);
       synchronized (am) {
         boolean exists = false;
@@ -155,13 +182,20 @@ public class AlmaRestServer {
     String path = ex.getRequestURI().getPath();
     String target = path.length() > "/affect/".length() ? path.substring("/affect/".length()) : null;
 
-    AffectOutputDocument aod = am.sInterface.getCurrentAffect();
-    if (aod == null) { fail(ex, 503, "no affect state yet — wait for first update"); return; }
+    if (target != null && target.startsWith("group/")) {
+      String groupName = target.substring("group/".length());
+      GroupManager[] groups = am.sInterface.getGroups();
+      if (groups != null) for (GroupManager group : groups) {
+        if (groupName.equals(group.getName())) { ok(ex, groupAffectJson(group)); return; }
+      }
+      fail(ex, 404, "group not found: " + groupName);
+      return;
+    }
 
     if (target == null || target.isEmpty()) {
       StringBuilder sb = new StringBuilder("[");
       boolean first = true;
-      for (CharacterAffect c : aod.getAffectOutput().getCharacterAffectList()) {
+      for (CharacterManager c : am.sInterface.getCharacters()) {
         if (!first) sb.append(",");
         sb.append(characterAffectJson(c));
         first = false;
@@ -171,35 +205,183 @@ public class AlmaRestServer {
       return;
     }
 
-    for (CharacterAffect c : aod.getAffectOutput().getCharacterAffectList()) {
+    for (CharacterManager c : am.sInterface.getCharacters()) {
       if (target.equals(c.getName())) { ok(ex, characterAffectJson(c)); return; }
     }
     fail(ex, 404, "character not found: " + target);
   }
 
-  private String characterAffectJson(CharacterAffect c) {
+  private String characterAffectJson(CharacterManager c) {
     StringBuilder sb = new StringBuilder("{");
     sb.append("\"name\":\"").append(escape(c.getName())).append("\",");
+    Personality personality = c.getPersonality();
+    sb.append("\"personality\":{")
+      .append("\"openness\":").append(personality.getOpenness()).append(",")
+      .append("\"conscientiousness\":").append(personality.getConscientiousness()).append(",")
+      .append("\"extraversion\":").append(personality.getExtraversion()).append(",")
+      .append("\"agreeableness\":").append(personality.getAgreeableness()).append(",")
+      .append("\"neurotism\":").append(personality.getNeurotism()).append(",")
+      .append("\"emotion_influence\":").append(c.getAffectConsts().personalityEmotionInfluence)
+      .append("},");
+    Emotion dominant = c.getCurrentEmotions().getDominantEmotion();
     sb.append("\"dominant_emotion\":{")
-      .append("\"name\":\"").append(escape(c.getDominantEmotion().getName().toString())).append("\",")
-      .append("\"intensity\":").append(c.getDominantEmotion().getValue())
+      .append("\"name\":\"").append(escape(dominant.getType().toString())).append("\",")
+      .append("\"intensity\":").append(dominant.getIntensity())
       .append("},");
-    sb.append("\"mood\":{")
-      .append("\"word\":\"").append(escape(c.getMood().getMoodword().toString())).append("\",")
-      .append("\"intensity\":\"").append(escape(c.getMood().getIntensity().toString())).append("\",")
-      .append("\"tendency\":\"").append(escape(c.getMoodTendency().getMoodword().toString())).append("\"")
-      .append("},");
+    sb.append("\"mood\":").append(moodJson(c.getCurrentMood())).append(",")
+      .append("\"mood_tendency\":").append(moodJson(c.getCurrentMoodTendency())).append(",")
+      .append("\"default_mood\":").append(moodJson(c.defaultMood())).append(",");
     sb.append("\"emotions\":[");
     boolean first = true;
-    for (Iterator<EmotionType> it = c.getEmotions().getEmotionList().iterator(); it.hasNext();) {
-      EmotionType et = it.next();
+    for (Iterator<?> it = c.getCurrentEmotions().getEmotions().iterator(); it.hasNext();) {
+      Emotion emotion = (Emotion) it.next();
       if (!first) sb.append(",");
-      sb.append("{\"name\":\"").append(escape(et.getName().toString()))
-        .append("\",\"intensity\":").append(et.getValue()).append("}");
+      sb.append("{\"name\":\"").append(escape(emotion.getType().toString()))
+        .append("\",\"intensity\":").append(emotion.getIntensity()).append("}");
       first = false;
     }
     sb.append("]}");
     return sb.toString();
+  }
+
+  private static String moodJson(Mood mood) {
+    return new StringBuilder("{")
+      .append("\"word\":\"").append(escape(mood.getMoodWord())).append("\",")
+      .append("\"intensity\":\"").append(escape(mood.getMoodWordIntensity())).append("\",")
+      .append("\"pleasure\":").append(mood.getPleasure()).append(",")
+      .append("\"arousal\":").append(mood.getArousal()).append(",")
+      .append("\"dominance\":").append(mood.getDominance())
+      .append("}").toString();
+  }
+
+  private static String groupAffectJson(GroupManager group) {
+    StringBuilder sb = new StringBuilder("{");
+    sb.append("\"name\":\"").append(escape(group.getName())).append("\",")
+      .append("\"overall_mood\":").append(moodJson(group.getCurrentMood())).append(",")
+      .append("\"social_integrity\":{")
+      .append("\"value\":\"").append(group.getSocialIntegrity()).append("\",")
+      .append("\"numeric\":").append(group.getSocialIntegrity())
+      .append("},")
+      .append("\"mood_similarities\":[");
+    boolean first = true;
+    String[] similar = group.getCharacterArrayInSimilarMood();
+    if (similar != null && !(similar.length == 1 && "none".equals(similar[0]))) {
+      for (int i = 0; i + 1 < similar.length; i += 2) {
+        if (!first) sb.append(',');
+        sb.append("{\"first\":\"").append(escape(similar[i])).append("\",\"second\":\"")
+          .append(escape(similar[i + 1])).append("\"}");
+        first = false;
+      }
+    }
+    sb.append("],\"mood_extremes\":[");
+    first = true;
+    List<CharacterManager> extremes = group.getCharactersInExtremeMood();
+    if (extremes != null) {
+      synchronized (extremes) {
+        for (CharacterManager character : extremes) {
+          if (!first) sb.append(',');
+          sb.append("{\"name\":\"").append(escape(character.getName())).append("\",\"difference\":")
+            .append(character.getDistancetoDefaultMood()).append('}');
+          first = false;
+        }
+      }
+    }
+    return sb.append("]}").toString();
+  }
+
+  private void handleGroups(HttpExchange ex) throws IOException {
+    if ("GET".equals(ex.getRequestMethod())) {
+      StringBuilder sb = new StringBuilder("{\"groups\":[");
+      boolean first = true;
+      GroupManager[] groups = am.sInterface.getGroups();
+      if (groups != null) {
+        for (GroupManager group : groups) {
+          if (!first) sb.append(',');
+          sb.append('"').append(escape(group.getName())).append('"');
+          first = false;
+        }
+      }
+      ok(ex, sb.append("]}").toString());
+      return;
+    }
+    if (!"POST".equals(ex.getRequestMethod())) { fail(ex, 405, "GET or POST only"); return; }
+    try {
+      Map<String, Object> body = exactBody(ex, 2, "name", "characters");
+      String name = requiredString(body, "name");
+      if (!name.matches("[A-Za-z0-9_. -]{1,80}")) throw new ApiException(400, "invalid group name");
+      if (!(body.get("characters") instanceof List)) throw new ApiException(400, "characters must be a JSON array");
+      List<?> values = (List<?>) body.get("characters");
+      if (values.size() < 2) throw new ApiException(400, "a group requires at least two characters");
+      List<String> characters = new ArrayList<>();
+      for (Object value : values) {
+        if (!(value instanceof String)) throw new ApiException(400, "every group character must be a string");
+        String character = ((String) value).trim();
+        requireCharacterExists(character);
+        if (characters.contains(character)) throw new ApiException(400, "duplicate group character: " + character);
+        characters.add(character);
+      }
+      try {
+        am.sInterface.getGroupByName(name);
+        throw new ApiException(409, "group already exists: " + name);
+      } catch (IllegalArgumentException ignored) {
+        // Missing group is expected.
+      }
+      addGroupFromAdaptor(name, characters);
+      created(ex, "{\"created\":true,\"name\":\"" + escape(name) + "\",\"characters\":["
+        + quotedStrings(characters) + "],\"persistent\":false}");
+    } catch (ApiException e) {
+      fail(ex, e.status, e.getMessage());
+    } catch (IllegalArgumentException e) {
+      fail(ex, 400, e.getMessage());
+    } catch (Exception e) {
+      fail(ex, 500, "cannot create group: " + e.getMessage());
+    }
+  }
+
+  private void addGroupFromAdaptor(String name, List<String> characters) throws Exception {
+    StringBuilder xml = new StringBuilder();
+    xml.append("<AffectDefinition xmlns=\"xml.affect.de\"><GroupAffect name=\"")
+      .append(xmlEscape(name)).append("\" characters=\"")
+      .append(xmlEscape(String.join(",", characters))).append("\" monitored=\"false\" docu=\"\">")
+      .append("<MoodSpecification decaytime=\"60000\" decayperiod=\"500\"/>")
+      .append("<EmotionSpecification decaytime=\"20000\" decayperiod=\"500\" decayfunction=\"linear\"/>")
+      .append("<Appraisal><Basic>")
+      .append("<GoodEvent desirability=\"0.5\"/>")
+      .append("<GoodEventForGoodOther desirability=\"0.5\" liking=\"0.5\" agency=\"other\"/>")
+      .append("<GoodEventForBadOther desirability=\"0.5\" liking=\"-0.5\" agency=\"other\"/>")
+      .append("<BadEvent desirability=\"-0.5\"/>")
+      .append("<BadEventForGoodOther desirability=\"-0.5\" liking=\"0.5\" agency=\"other\"/>")
+      .append("<BadEventForBadOther desirability=\"-0.5\" liking=\"-0.5\" agency=\"other\"/>")
+      .append("<GoodLikelyFutureEvent desirability=\"0.5\" likelihood=\"0.5\"/>")
+      .append("<GoodUnlikelyFutureEvent desirability=\"0.5\" likelihood=\"-0.5\"/>")
+      .append("<BadLikelyFutureEvent desirability=\"-0.5\" likelihood=\"0.5\"/>")
+      .append("<BadUnlikelyFutureEvent desirability=\"-0.5\" likelihood=\"-0.5\"/>")
+      .append("<EventConfirmed realization=\"true\"/><EventDisconfirmed realization=\"false\"/>")
+      .append("<GoodActSelf praiseworthiness=\"0.5\" agency=\"self\"/>")
+      .append("<GoodActOther praiseworthiness=\"0.5\" agency=\"other\"/>")
+      .append("<BadActSelf praiseworthiness=\"-0.5\" agency=\"self\"/>")
+      .append("<BadActOther praiseworthiness=\"-0.5\" agency=\"other\"/>")
+      .append("<NiceThing appealingness=\"0.5\"/><NastyThing appealingness=\"-0.5\"/>")
+      .append("</Basic></Appraisal></GroupAffect></AffectDefinition>");
+
+    AffectDefinitionDocument doc = AffectDefinitionDocument.Factory.parse(xml.toString());
+    AffectDefinition.GroupAffect profile = doc.getAffectDefinition().getGroupAffectArray(0);
+    // AffectDefinition requires at least one CharacterAffect at the document level.
+    // Validate the generated GroupAffect itself because this adaptor adds it to the
+    // already loaded (and complete) definition document below.
+    if (!profile.validate()) throw new IllegalArgumentException("generated group does not validate against ALMA Affect.xsd");
+    synchronized (am) {
+      AffectDefinition current = am.sInterface.getDocumentManager().getAffectDefinition();
+      int index = current.sizeOfGroupAffectArray();
+      AffectDefinition.GroupAffect stored = current.addNewGroupAffect();
+      stored.set(profile);
+      try {
+        am.initGroup(stored);
+      } catch (RuntimeException e) {
+        current.removeGroupAffect(index);
+        throw e;
+      }
+    }
   }
 
   private void handleEvent(HttpExchange ex) throws IOException {
@@ -251,37 +433,136 @@ public class AlmaRestServer {
 
   private void handlePad(HttpExchange ex) throws IOException {
     if (!"POST".equals(ex.getRequestMethod())) { fail(ex, 405, "POST only"); return; }
-    Map<String, String> body = parseJsonFlat(readBody(ex));
-    String character = body.get("character");
-    String p = body.get("p"), a = body.get("a"), d = body.get("d");
-    String intensity = body.getOrDefault("intensity", "1.0");
-    String elicitor  = body.getOrDefault("elicitor", "rest-api-pad");
-    if (character == null || p == null || a == null || d == null) {
-      fail(ex, 400, "required fields: character, p, a, d"); return;
-    }
     try {
-      AffectInput ai = AppraisalTag.instance().makePADInput(character, p, a, d, intensity, elicitor);
+      Map<String, Object> body = exactBody(ex, 6, "character", "pleasure", "arousal", "dominance", "intensity", "elicitor");
+      String character = requiredExistingCharacter(body, "character");
+      double p = signedNumber(body, "pleasure");
+      double a = signedNumber(body, "arousal");
+      double d = signedNumber(body, "dominance");
+      double intensity = unsignedNumber(body, "intensity");
+      String elicitor = requiredElicitor(body);
+      AffectInput ai = AppraisalTag.instance().makePADInput(character, Double.toString(p), Double.toString(a),
+        Double.toString(d), Double.toString(intensity), elicitor);
       am.sInterface.processSignal(ai);
-      ok(ex, "{\"accepted\":true,\"character\":\"" + escape(character) + "\",\"pad\":[" + p + "," + a + "," + d + "]}");
+      ok(ex, "{\"accepted\":true,\"character\":\"" + escape(character) + "\",\"pad\":{"
+        + "\"pleasure\":" + p + ",\"arousal\":" + a + ",\"dominance\":" + d
+        + "},\"intensity\":" + intensity + ",\"elicitor\":\"" + escape(elicitor) + "\"}");
+    } catch (ApiException e) {
+      fail(ex, e.status, e.getMessage());
     } catch (Exception e) {
-      fail(ex, 400, "processSignal failed: " + e.getMessage());
+      fail(ex, 500, "processSignal failed: " + e.getMessage());
+    }
+  }
+
+  private void handleEec(HttpExchange ex) throws IOException {
+    if (!"POST".equals(ex.getRequestMethod())) { fail(ex, 405, "POST only"); return; }
+    try {
+      Map<String, Object> body = exactBody(ex, 9, "character", "desirability", "praiseworthiness",
+        "appealingness", "likelihood", "realization", "liking", "agency", "elicitor");
+      String character = requiredExistingCharacter(body, "character");
+      String agency = requiredString(body, "agency");
+      if (!("self".equals(agency) || "other".equals(agency))) throw new ApiException(400, "agency must be self or other");
+      String elicitor = requiredElicitor(body);
+
+      AffectInput ai = AffectInput.Factory.newInstance();
+      AffectInput.Character characterNode = AffectInput.Character.Factory.newInstance();
+      characterNode.setName(character);
+      ai.setCharacter(characterNode);
+      AffectInput.BasicEEC eec = AffectInput.BasicEEC.Factory.newInstance();
+      eec.setDesirability(signedNumber(body, "desirability"));
+      eec.setPraiseworthiness(signedNumber(body, "praiseworthiness"));
+      eec.setAppealingness(signedNumber(body, "appealingness"));
+      eec.setLikelihood(signedNumber(body, "likelihood"));
+      eec.setRealization(signedNumber(body, "realization"));
+      eec.setLiking(signedNumber(body, "liking"));
+      eec.setAgency(AffectInput.BasicEEC.Agency.Enum.forString(agency));
+      eec.setElicitor(elicitor);
+      ai.setBasicEEC(eec);
+      am.sInterface.processSignal(ai);
+      ok(ex, "{\"accepted\":true,\"character\":\"" + escape(character)
+        + "\",\"type\":\"BasicEEC\",\"elicitor\":\"" + escape(elicitor) + "\"}");
+    } catch (ApiException e) {
+      fail(ex, e.status, e.getMessage());
+    } catch (IllegalArgumentException e) {
+      fail(ex, 400, e.getMessage());
+    } catch (Exception e) {
+      fail(ex, 500, "processSignal failed: " + e.getMessage());
+    }
+  }
+
+  private void handleAct(HttpExchange ex) throws IOException {
+    if (!"POST".equals(ex.getRequestMethod())) { fail(ex, 405, "POST only"); return; }
+    try {
+      Map<String, Object> body = exactBody(ex, 6, "performer", "addressee", "listener", "type", "intensity", "elicitor");
+      String performer = requiredExistingCharacter(body, "performer");
+      String addressee = requiredExistingCharacter(body, "addressee");
+      String listener = requiredExistingCharacter(body, "listener");
+      String type = requiredString(body, "type");
+      if (type.length() > 100) throw new ApiException(400, "type must not exceed 100 characters");
+      double intensity = unsignedNumber(body, "intensity");
+      String elicitor = requiredElicitor(body);
+
+      AffectInput ai = AffectInput.Factory.newInstance();
+      AffectInput.Character characterNode = AffectInput.Character.Factory.newInstance();
+      characterNode.setName(performer);
+      ai.setCharacter(characterNode);
+      AffectInput.Act act = AffectInput.Act.Factory.newInstance();
+      act.setType(type);
+      act.setAddressee(addressee);
+      act.setListener(listener);
+      act.setIntensity(Double.toString(intensity));
+      act.setElicitor(elicitor);
+      ai.setAct(act);
+      am.sInterface.processSignal(ai);
+      ok(ex, "{\"accepted\":true,\"performer\":\"" + escape(performer)
+        + "\",\"addressee\":\"" + escape(addressee) + "\",\"listener\":\"" + escape(listener)
+        + "\",\"type\":\"" + escape(type) + "\",\"intensity\":" + intensity
+        + ",\"elicitor\":\"" + escape(elicitor) + "\"}");
+    } catch (ApiException e) {
+      fail(ex, e.status, e.getMessage());
+    } catch (IllegalArgumentException e) {
+      fail(ex, 400, e.getMessage());
+    } catch (Exception e) {
+      fail(ex, 500, "processSignal failed: " + e.getMessage());
     }
   }
 
   private void handlePause(HttpExchange ex) throws IOException {
     if (!"POST".equals(ex.getRequestMethod())) { fail(ex, 405, "POST only"); return; }
-    String name = queryParam(ex, "character");
-    boolean r = (name == null) ? am.sInterface.pauseAffectComputation()
-                               : am.sInterface.pauseAffectComputation(name);
-    ok(ex, "{\"paused\":" + r + "}");
+    try {
+      String name = queryParam(ex, "character");
+      boolean r = (name == null) ? setPausedForAll(true)
+                                 : am.sInterface.getCharacterByName(name).pauseAffectComputation();
+      ok(ex, "{\"paused\":" + r + "}");
+    } catch (IllegalArgumentException e) {
+      fail(ex, 404, "character not found: " + queryParam(ex, "character"));
+    }
   }
 
   private void handleResume(HttpExchange ex) throws IOException {
     if (!"POST".equals(ex.getRequestMethod())) { fail(ex, 405, "POST only"); return; }
-    String name = queryParam(ex, "character");
-    boolean r = (name == null) ? am.sInterface.resumeAffectComputation()
-                               : am.sInterface.resumeAffectComputation(name);
-    ok(ex, "{\"resumed\":" + r + "}");
+    try {
+      String name = queryParam(ex, "character");
+      boolean r = (name == null) ? setPausedForAll(false)
+                                 : am.sInterface.getCharacterByName(name).resumeAffectComputation();
+      ok(ex, "{\"resumed\":" + r + "}");
+    } catch (IllegalArgumentException e) {
+      fail(ex, 404, "character not found: " + queryParam(ex, "character"));
+    }
+  }
+
+  private boolean setPausedForAll(boolean paused) {
+    boolean result = true;
+    for (CharacterManager character : am.sInterface.getCharacters()) {
+      boolean changed = paused ? character.pauseAffectComputation() : character.resumeAffectComputation();
+      result = changed && result;
+    }
+    GroupManager[] groups = am.sInterface.getGroups();
+    if (groups != null) for (GroupManager group : groups) {
+      boolean changed = paused ? group.pauseAffectComputation() : group.resumeAffectComputation();
+      result = changed && result;
+    }
+    return result;
   }
 
   private static void ok(HttpExchange ex, String json) throws IOException {
@@ -355,6 +636,76 @@ public class AlmaRestServer {
     return out;
   }
 
+  private static Map<String, Object> exactBody(HttpExchange ex, int size, String... fields)
+      throws IOException, ApiException {
+    final Map<String, Object> body;
+    try {
+      body = asObject(new JsonParser(readBody(ex)).parse(), "request body");
+    } catch (IllegalArgumentException e) {
+      throw new ApiException(400, e.getMessage());
+    }
+    if (body.size() != size) throw new ApiException(400, "request must contain exactly: " + String.join(", ", fields));
+    for (String field : fields) {
+      if (!body.containsKey(field)) throw new ApiException(400, "missing required field: " + field);
+    }
+    return body;
+  }
+
+  private String requiredExistingCharacter(Map<String, Object> body, String field) throws ApiException {
+    final String name;
+    try { name = requiredString(body, field); }
+    catch (IllegalArgumentException e) { throw new ApiException(400, e.getMessage()); }
+    requireCharacterExists(name);
+    return name;
+  }
+
+  private void requireCharacterExists(String name) throws ApiException {
+    try { am.sInterface.getCharacterByName(name); }
+    catch (IllegalArgumentException e) { throw new ApiException(404, "character not found: " + name); }
+  }
+
+  private static String requiredElicitor(Map<String, Object> body) throws ApiException {
+    final String elicitor;
+    try { elicitor = requiredString(body, "elicitor"); }
+    catch (IllegalArgumentException e) { throw new ApiException(400, e.getMessage()); }
+    if (elicitor.length() > 200) throw new ApiException(400, "elicitor must not exceed 200 characters");
+    return elicitor;
+  }
+
+  private static double signedNumber(Map<String, Object> body, String field) throws ApiException {
+    Object value = body.get(field);
+    if (!(value instanceof Number)) throw new ApiException(400, field + " must be a JSON number");
+    double number = ((Number) value).doubleValue();
+    if (!Double.isFinite(number) || number < -1.0 || number > 1.0) {
+      throw new ApiException(400, field + " must be between -1.0 and 1.0");
+    }
+    return number;
+  }
+
+  private static double unsignedNumber(Map<String, Object> body, String field) throws ApiException {
+    Object value = body.get(field);
+    if (!(value instanceof Number)) throw new ApiException(400, field + " must be a JSON number");
+    double number = ((Number) value).doubleValue();
+    if (!Double.isFinite(number) || number < 0.0 || number > 1.0) {
+      throw new ApiException(400, field + " must be between 0.0 and 1.0");
+    }
+    return number;
+  }
+
+  private static String quotedStrings(List<String> values) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < values.size(); i++) {
+      if (i > 0) sb.append(',');
+      sb.append('"').append(escape(values.get(i))).append('"');
+    }
+    return sb.toString();
+  }
+
+  private static final class ApiException extends Exception {
+    final int status;
+    ApiException(int status, String message) { super(message); this.status = status; }
+  }
+
   private static void appendAppraisalXml(StringBuilder xml, Map<String, Object> appraisal) {
     for (Map.Entry<String, Object> rule : appraisal.entrySet()) {
       String tag = rule.getKey();
@@ -388,8 +739,87 @@ public class AlmaRestServer {
     }
   }
 
-  private static void validateCompleteAppraisal(Map<String, Object> appraisal) {
-    String[] requiredTags = {
+  private static void appendComplexAppraisalXml(StringBuilder xml, Object value) {
+    if (!(value instanceof List)) throw new IllegalArgumentException("complex_appraisal must be a JSON array");
+    List<?> entries = (List<?>) value;
+    String[] kindOrder = { "self_act", "direct_act", "indirect_act", "self_emotion",
+      "indirect_emotion", "self_mood", "indirect_mood" };
+    for (int i = 0; i < entries.size(); i++) {
+      Map<String, Object> entry = asObject(entries.get(i), "complex_appraisal[" + i + "]");
+      String kind = requiredString(entry, "kind");
+      boolean supported = false;
+      for (String expected : kindOrder) if (expected.equals(kind)) supported = true;
+      if (!supported) throw new IllegalArgumentException("unsupported complex appraisal kind: " + kind);
+    }
+    for (String expectedKind : kindOrder) for (int i = 0; i < entries.size(); i++) {
+      Map<String, Object> entry = asObject(entries.get(i), "complex_appraisal[" + i + "]");
+      String kind = requiredString(entry, "kind");
+      if (!expectedKind.equals(kind)) continue;
+      String signal = requiredString(entry, "signal");
+      Map<String, Object> rules = requiredObject(entry, "appraisal");
+      if (rules.isEmpty()) throw new IllegalArgumentException("complex_appraisal[" + i + "].appraisal cannot be empty");
+      validateAppraisalSubset(rules);
+
+      String element;
+      String signalAttribute;
+      boolean needsPerformer;
+      if ("self_act".equals(kind)) { element = "SelfAct"; signalAttribute = "type"; needsPerformer = false; }
+      else if ("direct_act".equals(kind)) { element = "DirectAct"; signalAttribute = "type"; needsPerformer = true; }
+      else if ("indirect_act".equals(kind)) { element = "IndirectAct"; signalAttribute = "type"; needsPerformer = true; }
+      else if ("self_emotion".equals(kind)) { element = "SelfEmotion"; signalAttribute = "emotion"; needsPerformer = false; }
+      else if ("indirect_emotion".equals(kind)) { element = "IndirectEmotion"; signalAttribute = "emotion"; needsPerformer = true; }
+      else if ("self_mood".equals(kind)) { element = "SelfMood"; signalAttribute = "mood"; needsPerformer = false; }
+      else if ("indirect_mood".equals(kind)) { element = "IndirectMood"; signalAttribute = "mood"; needsPerformer = true; }
+      else throw new IllegalArgumentException("unsupported complex appraisal kind: " + kind);
+
+      xml.append('<').append(element).append(' ').append(signalAttribute).append("=\"")
+        .append(xmlEscape(signal)).append('"');
+      if (needsPerformer) {
+        String performer = requiredString(entry, "performer");
+        xml.append(" performer=\"").append(xmlEscape(performer)).append('"');
+      }
+      xml.append('>');
+      appendAppraisalXmlOrdered(xml, rules);
+      xml.append("</").append(element).append('>');
+    }
+  }
+
+  private static void appendAppraisalXmlOrdered(StringBuilder xml, Map<String, Object> rules) {
+    String[] order = basicTagNames();
+    for (String tag : order) {
+      if (!rules.containsKey(tag)) continue;
+      Map<String, Object> single = new LinkedHashMap<>();
+      single.put(tag, rules.get(tag));
+      appendAppraisalXml(xml, single);
+    }
+  }
+
+  private static void validateAppraisalSubset(Map<String, Object> appraisal) {
+    for (String tag : appraisal.keySet()) {
+      if (!isExactAppraisalTag(tag)) throw new IllegalArgumentException("unsupported complex appraisal tag: " + tag);
+      if ("GoodEvent".equals(tag)) positiveRule(appraisal, tag, "desirability");
+      else if ("BadEvent".equals(tag)) negativeRule(appraisal, tag, "desirability");
+      else if ("GoodEventForGoodOther".equals(tag)) otherEventRule(appraisal, tag, true, true);
+      else if ("GoodEventForBadOther".equals(tag)) otherEventRule(appraisal, tag, true, false);
+      else if ("BadEventForGoodOther".equals(tag)) otherEventRule(appraisal, tag, false, true);
+      else if ("BadEventForBadOther".equals(tag)) otherEventRule(appraisal, tag, false, false);
+      else if ("GoodLikelyFutureEvent".equals(tag)) futureRule(appraisal, tag, true, true);
+      else if ("GoodUnlikelyFutureEvent".equals(tag)) futureRule(appraisal, tag, true, false);
+      else if ("BadLikelyFutureEvent".equals(tag)) futureRule(appraisal, tag, false, true);
+      else if ("BadUnlikelyFutureEvent".equals(tag)) futureRule(appraisal, tag, false, false);
+      else if ("EventConfirmed".equals(tag)) realizationRule(appraisal, tag, true);
+      else if ("EventDisconfirmed".equals(tag)) realizationRule(appraisal, tag, false);
+      else if ("GoodActSelf".equals(tag)) actionRule(appraisal, tag, "self", true);
+      else if ("GoodActOther".equals(tag)) actionRule(appraisal, tag, "other", true);
+      else if ("BadActSelf".equals(tag)) actionRule(appraisal, tag, "self", false);
+      else if ("BadActOther".equals(tag)) actionRule(appraisal, tag, "other", false);
+      else if ("NiceThing".equals(tag)) positiveRule(appraisal, tag, "appealingness");
+      else if ("NastyThing".equals(tag)) negativeRule(appraisal, tag, "appealingness");
+    }
+  }
+
+  private static String[] basicTagNames() {
+    return new String[] {
       "GoodEvent", "GoodEventForGoodOther", "GoodEventForBadOther",
       "BadEvent", "BadEventForGoodOther", "BadEventForBadOther",
       "GoodLikelyFutureEvent", "GoodUnlikelyFutureEvent",
@@ -398,6 +828,10 @@ public class AlmaRestServer {
       "GoodActSelf", "GoodActOther", "BadActSelf", "BadActOther",
       "NiceThing", "NastyThing"
     };
+  }
+
+  private static void validateCompleteAppraisal(Map<String, Object> appraisal) {
+    String[] requiredTags = basicTagNames();
     if (appraisal.size() != requiredTags.length) {
       throw new IllegalArgumentException("appraisal must contain exactly all 18 ALMA Basic tags");
     }
@@ -580,6 +1014,7 @@ public class AlmaRestServer {
       if (pos >= input.length()) return error("expected JSON value");
       char c = input.charAt(pos);
       if (c == '{') return readObject();
+      if (c == '[') return readArray();
       if (c == '"') return readString();
       if (c == 't') return readLiteral("true", Boolean.TRUE);
       if (c == 'f') return readLiteral("false", Boolean.FALSE);
@@ -603,6 +1038,19 @@ public class AlmaRestServer {
         skipWhitespace();
         if (consume('}')) return object;
         if (!consume(',')) error("expected ',' or '}'");
+      }
+    }
+
+    private List<Object> readArray() {
+      List<Object> array = new ArrayList<>();
+      pos++;
+      skipWhitespace();
+      if (consume(']')) return array;
+      while (true) {
+        array.add(readValue());
+        skipWhitespace();
+        if (consume(']')) return array;
+        if (!consume(',')) error("expected ',' or ']'");
       }
     }
 
@@ -734,11 +1182,15 @@ public class AlmaRestServer {
     System.out.println("[alma-rest] endpoints:");
     System.out.println("  GET  /health");
     System.out.println("  GET  /characters");
-    System.out.println("  POST /characters {name, personality, mood, emotion, appraisal}");
+    System.out.println("  POST /characters {name, personality, mood, emotion, appraisal, complex_appraisal?}");
     System.out.println("  GET  /affect");
     System.out.println("  GET  /affect/{name}");
+    System.out.println("  GET  /affect/group/{name}");
     System.out.println("  POST /event      {character, tag, intensity, elicitor}");
-    System.out.println("  POST /pad        {character, p, a, d, intensity?, elicitor?}");
+    System.out.println("  POST /eec        {character, desirability, praiseworthiness, appealingness, likelihood, realization, liking, agency, elicitor}");
+    System.out.println("  POST /pad        {character, pleasure, arousal, dominance, intensity, elicitor}");
+    System.out.println("  POST /act        {performer, addressee, listener, type, intensity, elicitor}");
+    System.out.println("  GET|POST /groups");
     System.out.println("  POST /pause?character={name}");
     System.out.println("  POST /resume?character={name}");
   }
