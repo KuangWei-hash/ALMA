@@ -6,7 +6,8 @@
     "extraversion": 0.7,
     "agreeableness": 0.6,
     "neurotism": -0.2,
-    "emotion_influence": 0.2
+    "emotion_influence": 0.2,
+    "derived": false
   },
   "mood": {
     "decay_time": 600000,
@@ -19,6 +20,7 @@
     "decay_function": "linear",
     "baseline": 0.0
   },
+  "internal_affect_appraisal": false,
   "appraisal": {
     "GoodEvent": {
       "desirability": 0.7
@@ -110,6 +112,24 @@
         "GoodActOther": {
           "praiseworthiness": 0.8,
           "agency": "other"
+        }
+      }
+    },
+    {
+      "kind": "self_emotion",
+      "signal": "Joy",
+      "appraisal": {
+        "GoodEvent": {
+          "desirability": 0.6
+        }
+      }
+    },
+    {
+      "kind": "self_mood",
+      "signal": "Hostile",
+      "appraisal": {
+        "BadEvent": {
+          "desirability": -0.6
         }
       }
     }
